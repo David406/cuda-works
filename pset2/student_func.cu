@@ -104,13 +104,22 @@
 #include <algorithm>
 #include <math.h>
 
+
+#define BLOCKSIZE_X 16
+#define BLOCKSIZE_Y 16
+
+// Clamp to boundary function
+__device__
+void clamp(int &index, int end) {
+ index = (index < 0 ? 0 : (index > end ? end : index));
+}
+
 __global__
 void gaussian_blur(const unsigned char* const inputChannel,
                    unsigned char* const outputChannel,
                    int numRows, int numCols,
                    const float* const filter, const int filterWidth)
 {
-  // TODO
   
   // NOTE: Be sure to compute any intermediate results in floating point
   // before storing the final result as unsigned char.
@@ -138,8 +147,12 @@ void gaussian_blur(const unsigned char* const inputChannel,
   for (int filter_r = -filterWidth/2; filter_r <= filterWidth/2; filter_r++){
     for (int filter_c = -filterWidth/2; filter_c <= filterWidth/2; filter_c++) {
       // Find the global image position for this filter position and clamp to boundary
-      int image_r = min(max(static_cast<int>(idx_row) + filter_r, 0), numRows-1);
-      int image_c = min(max(static_cast<int>(idx_col) + filter_c, 0), numCols-1);
+      // int image_r = min(max(static_cast<int>(idx_row) + filter_r, 0), numRows-1);
+      // int image_c = min(max(static_cast<int>(idx_col) + filter_c, 0), numCols-1);
+      int image_r = static_cast<int>(idx_row) + filter_r;
+      clamp(image_r, numRows-1);
+      int image_c = static_cast<int>(idx_col) + filter_c;
+      clamp(image_c, numCols-1);
 
       float image_value = static_cast<float>(inputChannel[image_r * numCols + image_c]);
       float filter_value = filter[(filter_r + filterWidth/2) * filterWidth 
@@ -168,49 +181,69 @@ void gaussian_blur_shared_mem(const unsigned char* const inputChannel,
   /************** Copy data to shared memory *************/
   // Declare shared memory array including halo points
   const int RADIUS = filterWidth/2;
-  int nc = blockDim.x + 2*RADIUS;
-  int nr = blockDim.y + 2*RADIUS;
-  __shared__ unsigned char shared_data[nr][nc];
+  const int numRows_sh = blockDim.y + RADIUS;
+  extern __shared__ unsigned char shared_data[];
 
   // Copy blockDim.x * blockDim.y internal values to shared memory
   size_t global_thread_idx = idx_row * numCols + idx_col;
   size_t thread_pos_in_sh_r = threadIdx.y + RADIUS;
   size_t thread_pos_in_sh_c = threadIdx.x + RADIUS;
-  shared_data[thread_pos_in_sh_r][local_array_idx_c] 
+  shared_data[thread_pos_in_sh_r * numRows_sh + thread_pos_in_sh_c] 
 	                        = inputChannel[global_thread_idx];
 
   // Copy top and bottom halo points
   if (threadIdx.y < RADIUS) {
     // Top
-    shared_data[threadIdx.y][thread_pos_in_sh_c] 
-	    = inputChannel[(idx_row-RADIUS) * numCols + idx_col];
+    int halo_top_r = idx_row - RADIUS;
+    clamp(halo_top_r, numRows-1);
+    shared_data[threadIdx.y * numRows_sh + thread_pos_in_sh_c] 
+	    = inputChannel[halo_top_r * numCols + idx_col];
     // Bottom
-    shared_data[thread_pos_in_sh_r+blockDim.y][thread_pos_in_sh_c]
-	    = inputChannel[(idx_row+blockDim.y) * numCols + idx_col];
+    int halo_bot_r = idx_row + blockDim.y;
+    clamp(halo_bot_r, numRows-1);
+    shared_data[(thread_pos_in_sh_r+blockDim.y) * numRows_sh + thread_pos_in_sh_c]
+	    = inputChannel[halo_bot_r * numCols + idx_col];
   }
   // Copy left and right halo points
   if (threadIdx.x < RADIUS) {
     // Left
-    shared_data[thread_pos_in_sh_r][threadIdx.x]
-	    = inputChannel[idx_row * numCols + idx_col - RADIUS];
+    int halo_left_c = idx_col - RADIUS;
+    clamp(halo_left_c, numCols-1);
+    shared_data[thread_pos_in_sh_r * numRows_sh + threadIdx.x]
+	    = inputChannel[idx_row * numCols + halo_left_c];
     // Right
-    shared_data[thread_pos_in_sh_r][thread_pos_in_sh_c+blockDim.x]
-	    = inputChannel[idx_row * numCols + idx_col + blockDim.x];
+    int halo_right_c = idx_col + blockDim.x;
+    clamp(halo_right_c, numCols - 1);
+    shared_data[thread_pos_in_sh_r * numRows_sh + thread_pos_in_sh_c + blockDim.x]
+	    = inputChannel[idx_row * numCols + halo_right_c];
   }
   // Copy corner halo points
   if (threadIdx.x < RADIUS && threadIdx.y < RADIUS) {
+    // Clamp to boundary
+    int halo_upper_r = idx_row - RADIUS;
+    int halo_lower_r = idx_row + blockDim.y;
+    int halo_left_c = idx_col - RADIUS;
+    int halo_right_c = idx_col + blockDim.x;
+    clamp(halo_upper_r, numRows-1);
+    clamp(halo_lower_r, numRows-1);
+    clamp(halo_left_c, numCols-1);
+    clamp(halo_right_c, numCols-1);
+
     // Upper-left corner
-    shared_data[threadIdx.y][threadIdx.x] 
-	    = inputChannel[(idx_row-RADIUS) * numCols + idx_col-RADIUS];
+    shared_data[threadIdx.y * numRows_sh + threadIdx.x] 
+	    = inputChannel[halo_upper_r * numCols + halo_left_c];
+
     // Lower-right corner
-    shared_data[thread_pos_in_sh_r+blockDim.y][thread_pos_in_sh_c + blockDim.x]
-	    = inputChannel[(idx_row+blockDim.y) * numCols + idx_col + blockDim.x];
+    shared_data[(thread_pos_in_sh_r+blockDim.y) * numRows_sh + thread_pos_in_sh_c + blockDim.x]
+	    = inputChannel[halo_lower_r * numCols + halo_right_c];
+
     // Upper-right corner
-    shared_data[threadIdx.y][thread_pos_in_sh_c+blockDim.x]
-	    = inputChannel[(idx_row-RADIUS) * numCols + idx_col + blockDim.x];
+    shared_data[threadIdx.y * numRows_sh + thread_pos_in_sh_c + blockDim.x]
+	    = inputChannel[halo_upper_r * numCols + halo_right_c];
+
     // Lower-left corner
-    shared_data[thread_pos_in_sh_r+blockDim.y][threadIdx.x]
-	    = inputChannel[(idx_row+blockDim.y) * numCols + idx_col - RADIUS];
+    shared_data[(thread_pos_in_sh_r+blockDim.y) * numRows_sh + threadIdx.x]
+	    = inputChannel[halo_lower_r * numCols + halo_left_c];
   }
 
   // Synchronize to ensure all shared data is loaded
@@ -218,11 +251,11 @@ void gaussian_blur_shared_mem(const unsigned char* const inputChannel,
 
   float result = 0.f;
   for (int filter_r = -RADIUS; filter_r < RADIUS; filter_r++) {
-    for (int filter_c = -RADIUS; filter_c < RADIUS; filter_c) {
+    for (int filter_c = -RADIUS; filter_c < RADIUS; filter_c++) {
       size_t image_idx_in_sh_r = thread_pos_in_sh_r + filter_r;
       size_t image_idx_in_sh_c = thread_pos_in_sh_c + filter_c;
       
-      float image_value = shared_data[image_idx_in_sh_r][image_idx_in_sh_c];
+      float image_value = shared_data[image_idx_in_sh_r * numRows_sh + image_idx_in_sh_c];
       float filter_value = filter[(filter_r+RADIUS) * filterWidth + filter_c + RADIUS];
 
       result += image_value * filter_value;
@@ -241,7 +274,7 @@ void separateChannels(const uchar4* const inputImageRGBA,
                       unsigned char* const greenChannel,
                       unsigned char* const blueChannel)
 {
-  // TODO
+  // 
   //
   // NOTE: Be careful not to try to access memory that is outside the bounds of
   // the image. You'll want code that performs the following check before accessing
@@ -309,7 +342,7 @@ void allocateMemoryAndCopyToGPU(const size_t numRowsImage, const size_t numColsI
   checkCudaErrors(cudaMalloc(&d_green, sizeof(unsigned char) * numRowsImage * numColsImage));
   checkCudaErrors(cudaMalloc(&d_blue,  sizeof(unsigned char) * numRowsImage * numColsImage));
 
-  //TODO:
+  //
   //Allocate memory for the filter on the GPU
   //Use the pointer d_filter that we have already declared for you
   //You need to allocate memory for the filter with cudaMalloc
@@ -318,7 +351,7 @@ void allocateMemoryAndCopyToGPU(const size_t numRowsImage, const size_t numColsI
   //IMPORTANT: Notice that we pass a pointer to a pointer to cudaMalloc
   checkCudaErrors(cudaMalloc(&d_filter, sizeof(float) * filterWidth * filterWidth));
 
-  //TODO:
+  //
   //Copy the filter on the host (h_filter) to the memory you just allocated
   //on the GPU.  cudaMemcpy(dst, src, numBytes, cudaMemcpyHostToDevice);
   //Remember to use checkCudaErrors!
@@ -332,23 +365,23 @@ void your_gaussian_blur(const uchar4 * const h_inputImageRGBA, uchar4 * const d_
                         unsigned char *d_blueBlurred,
                         const int filterWidth)
 {
-  //TODO: Set reasonable block size (i.e., number of threads per block)
-  const dim3 blockSize(16, 16, 1);
+  // Set reasonable block size (i.e., number of threads per block)
+  const dim3 blockSize(BLOCKSIZE_X, BLOCKSIZE_Y, 1);
 
-  //TODO:
+  //
   //Compute correct grid size (i.e., number of blocks per kernel launch)
   //from the image size and and block size.
   const dim3 gridSize(numCols/blockSize.x + 1, numRows/blockSize.y + 1, 1);
 
-  //TODO: Launch a kernel for separating the RGBA image into different color channels
+  // Launch a kernel for separating the RGBA image into different color channels
   separateChannels<<<gridSize, blockSize>>>(d_inputImageRGBA, numRows, numCols, d_red, d_green, d_blue);
 
   // Call cudaDeviceSynchronize(), then call checkCudaErrors() immediately after
   // launching your kernel to make sure that you didn't make any mistakes.
   cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
-  //TODO: Call your convolution kernel here 3 times, once for each color channel.
-  gaussian_blur<<<gridSize, blockSize>>>(d_red, d_redBlurred, numRows, numCols, d_filter, filterWidth);
+  // Call your convolution kernel here 3 times, once for each color channel.
+  gaussian_blur_shared_mem<<<gridSize, blockSize>>>(d_red, d_redBlurred, numRows, numCols, d_filter, filterWidth);
   gaussian_blur<<<gridSize, blockSize>>>(d_green, d_greenBlurred, numRows, numCols, d_filter, filterWidth);
   gaussian_blur<<<gridSize, blockSize>>>(d_blue, d_blueBlurred, numRows, numCols, d_filter, filterWidth);
 
@@ -371,8 +404,8 @@ void your_gaussian_blur(const uchar4 * const h_inputImageRGBA, uchar4 * const d_
 }
 
 
-//Free all the memory that we allocated
-//TODO: make sure you free any arrays that you allocated
+// Free all the memory that we allocated
+// make sure you free any arrays that you allocated
 void cleanup() {
   checkCudaErrors(cudaFree(d_red));
   checkCudaErrors(cudaFree(d_green));
