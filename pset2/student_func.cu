@@ -151,6 +151,86 @@ void gaussian_blur(const unsigned char* const inputChannel,
   outputChannel[idx_row * numCols + idx_col] = result;
 }
 
+// This kernel computes the same convolution operation as the above  gaussian_blur() function,
+// but uses more efficient memory access by taking advantage of shared memory.
+__global__
+void gaussian_blur_shared_mem(const unsigned char* const inputChannel,
+		              unsigned char* const outputChannel,
+			      int numRows, int numCols,
+			      const float* const filter, const int filterWidth) {
+  // Get thread position
+  size_t idx_col = blockIdx.x * blockDim.x + threadIdx.x;
+  size_t idx_row = blockIdx.y * blockDim.y + threadIdx.y;
+
+  // Bound checking
+  if (idx_col >= numCols || idx_row >= numRows) return;
+  
+  /************** Copy data to shared memory *************/
+  // Declare shared memory array including halo points
+  const int RADIUS = filterWidth/2;
+  int nc = blockDim.x + 2*RADIUS;
+  int nr = blockDim.y + 2*RADIUS;
+  __shared__ unsigned char shared_data[nr][nc];
+
+  // Copy blockDim.x * blockDim.y internal values to shared memory
+  size_t global_thread_idx = idx_row * numCols + idx_col;
+  size_t thread_pos_in_sh_r = threadIdx.y + RADIUS;
+  size_t thread_pos_in_sh_c = threadIdx.x + RADIUS;
+  shared_data[thread_pos_in_sh_r][local_array_idx_c] 
+	                        = inputChannel[global_thread_idx];
+
+  // Copy top and bottom halo points
+  if (threadIdx.y < RADIUS) {
+    // Top
+    shared_data[threadIdx.y][thread_pos_in_sh_c] 
+	    = inputChannel[(idx_row-RADIUS) * numCols + idx_col];
+    // Bottom
+    shared_data[thread_pos_in_sh_r+blockDim.y][thread_pos_in_sh_c]
+	    = inputChannel[(idx_row+blockDim.y) * numCols + idx_col];
+  }
+  // Copy left and right halo points
+  if (threadIdx.x < RADIUS) {
+    // Left
+    shared_data[thread_pos_in_sh_r][threadIdx.x]
+	    = inputChannel[idx_row * numCols + idx_col - RADIUS];
+    // Right
+    shared_data[thread_pos_in_sh_r][thread_pos_in_sh_c+blockDim.x]
+	    = inputChannel[idx_row * numCols + idx_col + blockDim.x];
+  }
+  // Copy corner halo points
+  if (threadIdx.x < RADIUS && threadIdx.y < RADIUS) {
+    // Upper-left corner
+    shared_data[threadIdx.y][threadIdx.x] 
+	    = inputChannel[(idx_row-RADIUS) * numCols + idx_col-RADIUS];
+    // Lower-right corner
+    shared_data[thread_pos_in_sh_r+blockDim.y][thread_pos_in_sh_c + blockDim.x]
+	    = inputChannel[(idx_row+blockDim.y) * numCols + idx_col + blockDim.x];
+    // Upper-right corner
+    shared_data[threadIdx.y][thread_pos_in_sh_c+blockDim.x]
+	    = inputChannel[(idx_row-RADIUS) * numCols + idx_col + blockDim.x];
+    // Lower-left corner
+    shared_data[thread_pos_in_sh_r+blockDim.y][threadIdx.x]
+	    = inputChannel[(idx_row+blockDim.y) * numCols + idx_col - RADIUS];
+  }
+
+  // Synchronize to ensure all shared data is loaded
+  __syncthreads();
+
+  float result = 0.f;
+  for (int filter_r = -RADIUS; filter_r < RADIUS; filter_r++) {
+    for (int filter_c = -RADIUS; filter_c < RADIUS; filter_c) {
+      size_t image_idx_in_sh_r = thread_pos_in_sh_r + filter_r;
+      size_t image_idx_in_sh_c = thread_pos_in_sh_c + filter_c;
+      
+      float image_value = shared_data[image_idx_in_sh_r][image_idx_in_sh_c];
+      float filter_value = filter[(filter_r+RADIUS) * filterWidth + filter_c + RADIUS];
+
+      result += image_value * filter_value;
+    }
+  }
+  outputChannel[idx_row * numCols + idx_col] = result;
+}
+
 //This kernel takes in an image represented as a uchar4 and splits
 //it into three images consisting of only one color channel each
 __global__
