@@ -81,6 +81,21 @@
 
 #include "utils.h"
 
+// Kernel for finding min and max
+__global__
+void find_min_max(const float* const d_logLuminance,
+		  float &min_logLum,
+		  float &max_logLum,
+		  const size_t numRows,
+		  const size_t numCols)
+{
+  size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+  if (idx >= numCols * numRows) return;
+
+  for 
+}
+
 void your_histogram_and_prefixsum(const float* const d_logLuminance,
                                   unsigned int* const d_cdf,
                                   float &min_logLum,
