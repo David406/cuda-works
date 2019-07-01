@@ -80,20 +80,86 @@
 */
 
 #include "utils.h"
+#include <float.h>
+
+// BLOCKSIZE has to be of 2^s
+#define BLOCKSIZE 512;
 
 // Kernel for finding min and max
 __global__
-void find_min_max(const float* const d_logLuminance,
-		  float &min_logLum,
-		  float &max_logLum,
-		  const size_t numRows,
-		  const size_t numCols)
+void block_min_max(const float* const d_in,
+		  float* d_out,
+		  size_t size,
+		  bool wantMin)
 {
   size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
 
-  if (idx >= numCols * numRows) return;
+  // Declear shared data
+  extern __shared__ float sdata[];
+  
+  // Because we assume every block has a size of 2^s suitable for binary reduction
+  // We need to fill the holes in the last block that are out of images size
+  if (idx < size) {
+    // Load data to shared memory
+    sdata[threadIdx.x] = d_in[idx];
+  } else {
+    // File holes in the last block
+    if (wantMin) {
+      sdata[threadIdx.x] = FLT_MAX;
+    } else {
+      sdata[threadIdx.x] = FLT_MIN;
+    }
+  }
+  __syncthreads();
 
-  for 
+  // Reduction in global memory
+  for (unsigned int s = blockDim.x/2; s > 0; s >>= 1) {
+    if (threadIdx.x < s) {
+      if (wantMin) {
+        sdata[threadIdx.x] = sdata_min[threadIdx.x] < sdata_min[threadIdx.x+s] ?
+	        sdata_min[threadIdx.x] : sdata_min[threadIdx.x+s];
+      } else {
+        sdata[threadIdx.x] = sdata_max[threadIdx.x] > stada_max[threadIdx.x+s] ?
+	        sdata_max[threadIdx.x] : sdata_max[threadIdx.x+s];
+      }
+
+      __syncthreads();
+    }
+  }
+
+  // Thread 0 writes result for this block back to out
+  if (threadIdx.x == 0) {
+    d_out[blockIdx.x] = sdata[0];
+  }
+}
+
+void min_max_reduce(float* d_intermediate_min,
+		    float* d_intermediate_max,
+		    float* d_in,
+		    float &min,
+		    float &max,
+		    const size_t size) {
+  int numThreads = BLOCKSIZE;
+  int numBlocks = size / numThreads + 1;
+
+  size_t intermediate_size = size;
+  while (true) {
+    block_min_max<<<numBlocks, numThreads, numThreads * sizeof(float)>>>
+	    (d_in, d_intermediate, intermediate_size, true);
+    block_min_max<<<numBlocks, numThreads, numThreads * sizeof(float)>>>
+	    (d_in, d_intermediate, intermediate_size, false);
+
+    intermediate_size = gridDim.x;
+    
+    // Found the result and return
+    if (intermediate_size == 1) {
+      min = d_intermediate_min[0];
+      max = d_intermediate_max[0];
+      return;
+    }
+
+    numBlocks = intermediate_size / numThreads + 1;
+  }
 }
 
 void your_histogram_and_prefixsum(const float* const d_logLuminance,
