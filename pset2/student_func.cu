@@ -181,14 +181,14 @@ void gaussian_blur_shared_mem(const unsigned char* const inputChannel,
   /************** Copy data to shared memory *************/
   // Declare shared memory array including halo points
   const int RADIUS = filterWidth/2;
-  const int numRows_sh = blockDim.y + RADIUS;
+  const int numCols_sh = blockDim.x + 2*RADIUS;
   extern __shared__ unsigned char shared_data[];
 
   // Copy blockDim.x * blockDim.y internal values to shared memory
   size_t global_thread_idx = idx_row * numCols + idx_col;
   size_t thread_pos_in_sh_r = threadIdx.y + RADIUS;
   size_t thread_pos_in_sh_c = threadIdx.x + RADIUS;
-  shared_data[thread_pos_in_sh_r * numRows_sh + thread_pos_in_sh_c] 
+  shared_data[thread_pos_in_sh_r * numCols_sh + thread_pos_in_sh_c] 
 	                        = inputChannel[global_thread_idx];
 
   // Copy top and bottom halo points
@@ -196,12 +196,12 @@ void gaussian_blur_shared_mem(const unsigned char* const inputChannel,
     // Top
     int halo_top_r = idx_row - RADIUS;
     clamp(halo_top_r, numRows-1);
-    shared_data[threadIdx.y * numRows_sh + thread_pos_in_sh_c] 
+    shared_data[threadIdx.y * numCols_sh + thread_pos_in_sh_c] 
 	    = inputChannel[halo_top_r * numCols + idx_col];
     // Bottom
     int halo_bot_r = idx_row + blockDim.y;
     clamp(halo_bot_r, numRows-1);
-    shared_data[(thread_pos_in_sh_r+blockDim.y) * numRows_sh + thread_pos_in_sh_c]
+    shared_data[(thread_pos_in_sh_r+blockDim.y) * numCols_sh + thread_pos_in_sh_c]
 	    = inputChannel[halo_bot_r * numCols + idx_col];
   }
   // Copy left and right halo points
@@ -209,12 +209,12 @@ void gaussian_blur_shared_mem(const unsigned char* const inputChannel,
     // Left
     int halo_left_c = idx_col - RADIUS;
     clamp(halo_left_c, numCols-1);
-    shared_data[thread_pos_in_sh_r * numRows_sh + threadIdx.x]
+    shared_data[thread_pos_in_sh_r * numCols_sh + threadIdx.x]
 	    = inputChannel[idx_row * numCols + halo_left_c];
     // Right
     int halo_right_c = idx_col + blockDim.x;
     clamp(halo_right_c, numCols - 1);
-    shared_data[thread_pos_in_sh_r * numRows_sh + thread_pos_in_sh_c + blockDim.x]
+    shared_data[thread_pos_in_sh_r * numCols_sh + thread_pos_in_sh_c + blockDim.x]
 	    = inputChannel[idx_row * numCols + halo_right_c];
   }
   // Copy corner halo points
@@ -230,19 +230,19 @@ void gaussian_blur_shared_mem(const unsigned char* const inputChannel,
     clamp(halo_right_c, numCols-1);
 
     // Upper-left corner
-    shared_data[threadIdx.y * numRows_sh + threadIdx.x] 
+    shared_data[threadIdx.y * numCols_sh + threadIdx.x] 
 	    = inputChannel[halo_upper_r * numCols + halo_left_c];
 
     // Lower-right corner
-    shared_data[(thread_pos_in_sh_r+blockDim.y) * numRows_sh + thread_pos_in_sh_c + blockDim.x]
+    shared_data[(thread_pos_in_sh_r+blockDim.y) * numCols_sh + thread_pos_in_sh_c + blockDim.x]
 	    = inputChannel[halo_lower_r * numCols + halo_right_c];
 
     // Upper-right corner
-    shared_data[threadIdx.y * numRows_sh + thread_pos_in_sh_c + blockDim.x]
+    shared_data[threadIdx.y * numCols_sh + thread_pos_in_sh_c + blockDim.x]
 	    = inputChannel[halo_upper_r * numCols + halo_right_c];
 
     // Lower-left corner
-    shared_data[(thread_pos_in_sh_r+blockDim.y) * numRows_sh + threadIdx.x]
+    shared_data[(thread_pos_in_sh_r+blockDim.y) * numCols_sh + threadIdx.x]
 	    = inputChannel[halo_lower_r * numCols + halo_left_c];
   }
 
@@ -255,7 +255,7 @@ void gaussian_blur_shared_mem(const unsigned char* const inputChannel,
       size_t image_idx_in_sh_r = thread_pos_in_sh_r + filter_r;
       size_t image_idx_in_sh_c = thread_pos_in_sh_c + filter_c;
       
-      float image_value = shared_data[image_idx_in_sh_r * numRows_sh + image_idx_in_sh_c];
+      float image_value = shared_data[image_idx_in_sh_r * numCols_sh + image_idx_in_sh_c];
       float filter_value = filter[(filter_r+RADIUS) * filterWidth + filter_c + RADIUS];
 
       result += image_value * filter_value;
@@ -382,8 +382,8 @@ void your_gaussian_blur(const uchar4 * const h_inputImageRGBA, uchar4 * const d_
 
   // Call your convolution kernel here 3 times, once for each color channel.
   gaussian_blur_shared_mem<<<gridSize, blockSize>>>(d_red, d_redBlurred, numRows, numCols, d_filter, filterWidth);
-  gaussian_blur<<<gridSize, blockSize>>>(d_green, d_greenBlurred, numRows, numCols, d_filter, filterWidth);
-  gaussian_blur<<<gridSize, blockSize>>>(d_blue, d_blueBlurred, numRows, numCols, d_filter, filterWidth);
+  gaussian_blur_shared_mem<<<gridSize, blockSize>>>(d_green, d_greenBlurred, numRows, numCols, d_filter, filterWidth);
+  gaussian_blur_shared_mem<<<gridSize, blockSize>>>(d_blue, d_blueBlurred, numRows, numCols, d_filter, filterWidth);
 
   // Again, call cudaDeviceSynchronize(), then call checkCudaErrors() immediately after
   // launching your kernel to make sure that you didn't make any mistakes.

@@ -33,12 +33,14 @@
 
 #include "utils.h"
 
+#define BLOCKSIZE 16
+
 __global__
 void rgba_to_greyscale(const uchar4* const rgbaImage,
                        unsigned char* const greyImage,
                        int numRows, int numCols)
 {
-  //TODO
+  //
   //Fill in the kernel to convert from color to greyscale
   //the mapping from components of a uchar4 to RGBA is:
   // .x -> R ; .y -> G ; .z -> B ; .w -> A
@@ -68,9 +70,8 @@ void your_rgba_to_greyscale(const uchar4 * const h_rgbaImage, uchar4 * const d_r
 {
   //You must fill in the correct sizes for the blockSize and gridSize
   //currently only one block with one thread is being launched
-  const int bs = 16;
-  const dim3 blockSize(bs, bs, 1);  //TODO
-  const dim3 gridSize( numCols/bs+1, numRows/bs+1, 1);  //TODO
+  const dim3 blockSize(BLOCKSIZE, BLOCKSIZE, 1);  
+  const dim3 gridSize( numCols/BLOCKSIZE+1, numRows/BLOCKSIZE+1, 1);  
   rgba_to_greyscale<<<gridSize, blockSize>>>(d_rgbaImage, d_greyImage, numRows, numCols);
   
   cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
