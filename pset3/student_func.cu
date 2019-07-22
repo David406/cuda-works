@@ -83,7 +83,7 @@
 #include <float.h>
 
 // BLOCKSIZE has to be of 2^s
-#define BLOCKSIZE 512;
+#define BLOCKSIZE 1024;
 
 // Kernel for finding min and max
 __global__
@@ -95,32 +95,32 @@ void block_min_max(const float* const d_in,
   size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
 
   // Declear shared data
-  extern __shared__ float sdata[];
+  extern __shared__ float shdata[];
   
   // Because we assume every block has a size of 2^s suitable for binary reduction
   // We need to fill the holes in the last block that are out of images size
   if (idx < size) {
     // Load data to shared memory
-    sdata[threadIdx.x] = d_in[idx];
+    shdata[threadIdx.x] = d_in[idx];
   } else {
     // File holes in the last block
     if (wantMin) {
-      sdata[threadIdx.x] = FLT_MAX;
+      shdata[threadIdx.x] = FLT_MAX;
     } else {
-      sdata[threadIdx.x] = FLT_MIN;
+      shdata[threadIdx.x] = FLT_MIN;
     }
   }
   __syncthreads();
 
   // Reduction in global memory
-  for (unsigned int s = blockDim.x/2; s > 0; s >>= 1) {
+  for (size_t s = blockDim.x/2; s > 0; s >>= 1) {
     if (threadIdx.x < s) {
       if (wantMin) {
-        sdata[threadIdx.x] = sdata_min[threadIdx.x] < sdata_min[threadIdx.x+s] ?
-	        sdata_min[threadIdx.x] : sdata_min[threadIdx.x+s];
+        shdata[threadIdx.x] = shdata[threadIdx.x] < shdata[threadIdx.x+s] ?
+	        shdata[threadIdx.x] : shdata[threadIdx.x+s];
       } else {
-        sdata[threadIdx.x] = sdata_max[threadIdx.x] > stada_max[threadIdx.x+s] ?
-	        sdata_max[threadIdx.x] : sdata_max[threadIdx.x+s];
+        shdata[threadIdx.x] = shdata[threadIdx.x] > shdata[threadIdx.x+s] ?
+	        shdata[threadIdx.x] : shdata[threadIdx.x+s];
       }
 
       __syncthreads();
@@ -129,37 +129,92 @@ void block_min_max(const float* const d_in,
 
   // Thread 0 writes result for this block back to out
   if (threadIdx.x == 0) {
-    d_out[blockIdx.x] = sdata[0];
+    d_out[blockIdx.x] = shdata[0];
   }
 }
 
-void min_max_reduce(float* d_intermediate_min,
-		    float* d_intermediate_max,
-		    float* d_in,
-		    float &min,
-		    float &max,
-		    const size_t size) {
+void min_max_reduce(const float* const d_in,
+		    float &minmax,
+		    size_t size,
+		    bool wantMin) {
   int numThreads = BLOCKSIZE;
   int numBlocks = size / numThreads + 1;
 
-  size_t intermediate_size = size;
+  const float* d_temp_in;
+  float d_temp_out[numBlocks];
+  size_t size_in = size;
+  d_temp_in = d_in;
   while (true) {
     block_min_max<<<numBlocks, numThreads, numThreads * sizeof(float)>>>
-	    (d_in, d_intermediate, intermediate_size, true);
-    block_min_max<<<numBlocks, numThreads, numThreads * sizeof(float)>>>
-	    (d_in, d_intermediate, intermediate_size, false);
+	    (d_temp_in, d_temp_out, size_in, wantMin);
 
-    intermediate_size = gridDim.x;
-    
     // Found the result and return
-    if (intermediate_size == 1) {
-      min = d_intermediate_min[0];
-      max = d_intermediate_max[0];
-      return;
+    if (numBlocks == 1) {
+        minmax = d_temp_out[0];
+	return;
     }
-
-    numBlocks = intermediate_size / numThreads + 1;
+    size_in = numBlocks;
+    numBlocks = numBlocks / numThreads + 1;
+    d_temp_in = d_temp_out;
   }
+}
+
+
+__global__ 
+void gen_hist(const float * const d_logLuminance,
+		    int * d_bins,
+		    const float min_logLum,
+		    const float lumRange,
+		    const size_t numBins,
+		    size_t size,
+		    bool useLocalBin) {
+   size_t idx = blockIdx.x * blockDim.x + threadIdx.x; 
+   
+   if (idx >= size) return;
+
+   // Use atomicAdd
+   if (!useLocalBin) {
+      float lum_value = d_logLuminance[idx];
+      size_t bin = (lum_value - min_logLum) / lumRange * numBins;
+      atomicAdd(&(d_bins[bin]), 1);
+   }
+}
+
+
+
+// This function implements the Hillis Steele algorithm
+// This version is from the NVIDIA GPU Gems.
+/* This version can handle arrays only as large as can be
+   processed by a single thread block running on one multiprocessor
+   of a GPU. */
+__global__ 
+void prescan(const int* const d_bins, 
+		unsigned int* const d_cdf,
+	       	const size_t numBins) {
+  extern __shared__ float shdata[]; // Shared memory allocated on kernel launch
+  int pout = 0, pin = 1;
+  int thid = threadIdx.x;
+
+  // Load input into shared memory
+  // This is a exclusive scan, so shift right by one
+  // and set first element to 0.
+  shdata[pout * numBins + thid] = (thid > 0) ? d_bins[thid - 1] : 0;
+  __syncthreads();
+
+  for (int offset = 1; offset < numBins; offset *= 2) {
+    // Swap double buffer indices
+    pout = 1 - pout; 
+    pin = 1 - pout;
+   
+    // Double buffered 
+    if (thid >= offset) {
+      shdata[pout * numBins + thid] += shdata[pin * numBins + thid - offset];
+    } else {
+      shdata[pout * numBins + thid] = shdata[pin * numBins + thid];
+    }
+    __syncthreads();
+  }
+  d_cdf[thid] = shdata[pout * numBins + thid];
 }
 
 void your_histogram_and_prefixsum(const float* const d_logLuminance,
@@ -170,7 +225,7 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
                                   const size_t numCols,
                                   const size_t numBins)
 {
-  //TODO
+  //
   /*Here are the steps you need to implement
     1) find the minimum and maximum value in the input logLuminance channel
        store in min_logLum and max_logLum
@@ -181,5 +236,22 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
        the cumulative distribution of luminance values (this should go in the
        incoming d_cdf pointer which already has been allocated for you)       */
 
+    min_max_reduce(d_logLuminance, min_logLum, numRows*numCols, true);
+    min_max_reduce(d_logLuminance, max_logLum, numRows*numCols, false);
 
+    // Allocate memory to store bins
+    int *d_bins;
+    checkCudaErrors(cudaMalloc(&d_bins, numBins * sizeof(size_t)));
+
+    // Launch kernel to generate histogram
+    const int numThreads = BLOCKSIZE;
+    const int numBlocks = numRows*numCols / numThreads + 1;
+    gen_hist<<<numBlocks, numThreads>>>(d_logLuminance, d_bins, 
+		    min_logLum, max_logLum - min_logLum, 
+		    numBins, numRows*numCols, false);
+    
+    // numBins is defined to be 1024 in another file
+    prescan<<<1, numBins, 2 * numBins * sizeof(unsigned)>>>(d_bins, d_cdf, numBins);
+
+    checkCudaErrors(cudaFree(d_bins));
 }
